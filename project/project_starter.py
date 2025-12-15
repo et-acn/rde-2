@@ -10,13 +10,13 @@ from typing import Dict, List, Union
 from sqlalchemy import create_engine, Engine
 
 # Create an SQLite database
-db_engine = create_engine("sqlite:///munder_difflin.db")
+db_engine = create_engine("sqlite:///munder_difflin.db2")
 
 # List containing the different kinds of papers 
 paper_supplies = [
     # Paper Types (priced per sheet unless specified)
     {"item_name": "A4 paper",                         "category": "paper",        "unit_price": 0.05},
-    {"item_name": "Letter-sized paper",              "category": "paper",        "unit_price": 0.06},
+    {"item_name": "Letter-sized paper",               "category": "paper",        "unit_price": 0.06},
     {"item_name": "Cardstock",                        "category": "paper",        "unit_price": 0.15},
     {"item_name": "Colored paper",                    "category": "paper",        "unit_price": 0.10},
     {"item_name": "Glossy paper",                     "category": "paper",        "unit_price": 0.20},
@@ -520,7 +520,6 @@ def generate_financial_report(as_of_date: Union[str, datetime]) -> Dict:
         "top_selling_products": top_selling_products,
     }
 
-
 def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
     """
     Retrieve a list of historical quotes that match any of the provided search terms.
@@ -578,7 +577,7 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
     # Execute parameterized query
     with db_engine.connect() as conn:
         result = conn.execute(text(query), params)
-        return [dict(row) for row in result]
+        return [row._asdict() for row in result]
 
 ########################
 ########################
@@ -587,33 +586,288 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
 ########################
 ########################
 ########################
+#!!!
+import asyncio
+from typing import TypedDict
+from openai import AsyncOpenAI
+from pydantic import BaseModel, create_model, Field
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
 
+dotenv.load_dotenv();
+
+llm = OpenAIChatModel('gpt-4o', provider=OpenAIProvider(
+    openai_client=AsyncOpenAI(
+        api_key=os.getenv('OPENAI_API_KEY'),
+        base_url=os.getenv('OPENAI_BASE_URL')
+    )
+))
 
 # Set up and load your env parameters and instantiate your model.
-
 
 """Set up tools for your agents to use, these should be methods that combine the database functions above
  and apply criteria to them to ensure that the flow of the system is correct."""
 
-
 # Tools for inventory agent
+def get_current_inventory_snapshot() -> Dict[str, int]:
+    """
+    Retrieves the current stock level for all items in inventory.
+    
+    This uses today's date as the cutoff. Only items with positive stock are included.
 
+    Returns:
+        Dict[str, int]: A dictionary mapping item names to their current stock levels.
+    """
+    # Use the current date for the snapshot
+    today_date_str = datetime.now().strftime("%Y-%m-%d")
+    
+    # Helper function call
+    return get_all_inventory(as_of_date=today_date_str)
+
+def check_item_stock(item_name: str) -> int:
+    """
+    Retrieves the current stock level for a specific item.
+    
+    Returns 0 if the item is not currently in stock or has never been sold/ordered.
+
+    Args:
+        item_name (str): The name of the item to check.
+
+    Returns:
+        int: The net current stock level of the item.
+    """
+    # Use the current date for the check
+    today = datetime.now()
+    
+    # Helper function call returns a DataFrame
+    stock_df = get_stock_level(item_name=item_name, as_of_date=today)
+    
+    # Extract the integer value from the single-row DataFrame
+    return int(stock_df["current_stock"].iloc[0])
+
+def generate_current_financial_report() -> Dict:
+    """
+    Generates a complete financial report as of the current date, including 
+    cash balance, inventory valuation, total assets, itemized inventory, 
+    and top-selling products.
+
+    Returns:
+        Dict: The full financial report.
+    """
+    # Use the current date for the report
+    today = datetime.now()
+    
+    # Helper function call
+    return generate_financial_report(as_of_date=today)
 
 # Tools for quoting agent
+def record_sale_transaction(item_name: str, quantity: int, total_revenue: float) -> int:
+    """
+    Records a new sale transaction resulting from a successful quote.
+    
+    The transaction date is set to the time the function is called.
+
+    Args:
+        item_name (str): The name of the item sold.
+        quantity (int): The number of units sold.
+        total_revenue (float): The total price received from the sale.
+
+    Returns:
+        int: The ID of the newly created transaction.
+    """
+    # Set transaction details
+    transaction_type = "sales"
+    current_date = datetime.now()
+    
+    # Helper function call
+    return create_transaction(
+        item_name=item_name,
+        transaction_type=transaction_type,
+        quantity=quantity,
+        price=total_revenue,
+        date=current_date,
+    )
+
+def search_historical_quotes(search_terms: List[str], limit: int = 5) -> List[Dict]:
+    """
+    Searches historical quotes for matches against provided keywords in the 
+    customer request or quote explanation.
+
+    Args:
+        search_terms (List[str]): List of keywords or phrases to search.
+        limit (int, optional): Maximum number of quotes to return. Defaults to 5.
+
+    Returns:
+        List[Dict]: A list of matching quotes with relevant details.
+    """
+    # Helper function call
+    return search_quote_history(search_terms=search_terms, limit=limit)
 
 
 # Tools for ordering agent
+def place_stock_order(item_name: str, quantity: int, total_cost: float) -> int:
+    """
+    Records a new stock purchase transaction to replenish inventory.
+    
+    The transaction date is set to the time the function is called.
 
+    Args:
+        item_name (str): The name of the item purchased.
+        quantity (int): The number of units ordered.
+        total_cost (float): The total price paid for the order.
+
+    Returns:
+        int: The ID of the newly created transaction.
+    """
+    # Set transaction details
+    transaction_type = "stock_orders"
+    current_date = datetime.now()
+    
+    # Helper function call
+    return create_transaction(
+        item_name=item_name,
+        transaction_type=transaction_type,
+        quantity=quantity,
+        price=total_cost,
+        date=current_date,
+    )
+
+def estimate_delivery_date(quantity: int) -> str:
+    """
+    Estimates the supplier delivery date for a stock order based on the 
+    requested quantity, using the current date as the starting point.
+
+    Args:
+        quantity (int): The number of units in the potential order.
+
+    Returns:
+        str: Estimated delivery date in ISO format (YYYY-MM-DD).
+    """
+    # Use the current date as the starting point for delivery calculation
+    start_date_str = datetime.now().strftime("%Y-%m-%d")
+    
+    # Helper function call
+    return get_supplier_delivery_date(
+        input_date_str=start_date_str, 
+        quantity=quantity
+    )
 
 # Set up your agents and create an orchestration agent that will manage them.
 
+class TaskAssignment(BaseModel):
+    agent: str
+    task: str
 
+class ExpertOutput(BaseModel):
+    answers: List[str]
+    actions: List[str]
+    errors: List[str]
+
+class Expert(Agent):
+    role: str
+    task: str
+    output: ExpertOutput
+    def __init__(self, role, tools):
+        super().__init__(
+            model=llm,
+            deps_type=str,
+            system_prompt=(
+                f"Your are a {role} agent for a paper distributer. "
+                "You will analyze the task you are given. "
+                "You will perform any actions required to carry out the task. "
+                "You will record descriptions of the actions you take, "
+                "and descriptions of any parts of the task you are unable to carry out."
+                "If the task requires gathering some information or answering questions, "
+                "you will record succinct answers to those queries. "        
+                "You will produce a dictionary containing an 'answers' entry, with a list"
+                "of answers to queries posed in the task (if any), an 'actions' entry, with "
+                "a list of strings describing actions taken, and an 'error' entry, with "
+                "a list of strings describing things you could not carry out."                
+            ),
+            tools=tools)
+    
+router = Agent(
+    model=llm,
+    deps_type=str,
+    system_prompt=(
+        "You are a semantic classifier and task-router for a paper distributer. "
+        "You will analyze a given query."
+        "You will determine cognitive tasks required to answer the query, "
+        "and associate those tasks with agents suited to carry them out. "
+        "You should give an explicit and detailed description for each task. "
+        "The task description should contain any data needed to cary out the task. "
+        "Each task should be associated with one of these agent's names: "
+        "'inventory': suited to perform queries and updates of inventory. "
+        "'quoting': suited to pricing inbound orders. "
+        "'ordering': suited to generating and placing orders for materials. "
+        "You should produce a list of dictionaries each containing "
+        "an 'agent' entry with one of the above agent name strings, and"
+        "a 'task' entry with a string describing a task for the agent."
+    ),
+    output_type=List[TaskAssignment],
+    tools=[]
+)
+async def run_router(query: str) -> TaskAssignment:
+    "Invoke the task-router to parse tasks from the given query."
+    return (await router.run(query)).output
+
+
+inventory_expert = Expert("inventory manager", [
+    get_current_inventory_snapshot,
+    check_item_stock,
+    generate_current_financial_report        
+])
+async def run_inventory(task: str) -> ExpertOutput:
+    """Invoke the inventory manager expert to perform the given task"""
+    return (await inventory_expert.run(task)).output
+    
+quoting_expert = Expert("price-quoting agent", [
+    record_sale_transaction,
+    search_historical_quotes
+])
+async def run_quoting(task: str) -> ExpertOutput:
+    """Invoke the price-quoting expert to perform the given task"""
+    return (await quoting_expert.run(task)).output
+
+ordering_expert = Expert("order-handling agent", [
+    place_stock_order,
+    estimate_delivery_date
+])
+async def run_ordering(task: str) -> ExpertOutput:
+    """Invoke the order-handling expert to perform the given task"""
+    return (await ordering_expert.run(task)).output
+
+orchestrator = Agent(
+    model=llm,
+    deps_type=str,
+    system_prompt=(
+        "You are an orchestrator for multiple expert agents at a paper company. "
+        "You will be given a user query. "
+        "You have access to various expert agents as tools. "
+        "Each expert takes a string describing a task. "
+        "You should use the router agent to break the query into task assignments. "
+        "You should then dispatch those tasks to the associated expert agents. "
+        "You should evaluate these agent's responses, and distribute more tasks if needed. "
+        "When you are satisfied that the overall intent of the query has been met, "
+        "Your should synthesize the expert's summaries into a plain-English string response. "
+        "Do not expose any sensitive information, including personal identifying info. "
+    ),
+    output_type=str,
+    tools=[run_router, run_inventory, run_quoting, run_ordering]
+)
+
+async def test():
+    summary = (await orchestrator.run("order 10000 more rolls of paper")).output
+    print(summary)
+
+# asyncio.run(test())
 # Run your test scenarios by writing them here. Make sure to keep track of them.
 
-def run_test_scenarios():
+async def run_test_scenarios():
     
     print("Initializing Database...")
-    init_database()
+    init_database(db_engine)
     try:
         quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
         quote_requests_sample["request_date"] = pd.to_datetime(
@@ -645,7 +899,7 @@ def run_test_scenarios():
     # INITIALIZE YOUR MULTI AGENT SYSTEM HERE
     ############
     ############
-    ############
+    ############    
 
     results = []
     for idx, row in quote_requests_sample.iterrows():
@@ -668,7 +922,7 @@ def run_test_scenarios():
         ############
         ############
 
-        # response = call_your_multi_agent_system(request_with_date)
+        response = (await orchestrator.run(request_with_date)).output
 
         # Update state
         report = generate_financial_report(request_date)
@@ -702,6 +956,5 @@ def run_test_scenarios():
     pd.DataFrame(results).to_csv("test_results.csv", index=False)
     return results
 
-
 if __name__ == "__main__":
-    results = run_test_scenarios()
+    results = asyncio.run(run_test_scenarios())
