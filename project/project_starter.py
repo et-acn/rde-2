@@ -126,7 +126,7 @@ def generate_sample_inventory(paper_supplies: list, coverage: float = 0.4, seed:
     # Return inventory as a pandas DataFrame
     return pd.DataFrame(inventory)
 
-def init_database(db_engine: Engine, seed: int = 137) -> Engine:    
+def init_database(db_engine: Engine = db_engine, seed: int = 137) -> Engine:    
     """
     Set up the Munder Difflin database with all required tables and initial records.
 
@@ -609,6 +609,8 @@ llm = OpenAIChatModel('gpt-4o', provider=OpenAIProvider(
 """Set up tools for your agents to use, these should be methods that combine the database functions above
  and apply criteria to them to ensure that the flow of the system is correct."""
 
+# Note: tools were generated with LLM assistance
+
 # Tools for inventory agent
 def get_current_inventory_snapshot() -> Dict[str, int]:
     """
@@ -679,7 +681,7 @@ def record_sale_transaction(item_name: str, quantity: int, total_revenue: float)
     # Set transaction details
     transaction_type = "sales"
     current_date = datetime.now()
-    
+    print(f"sold {quantity} {item_name} for {total_revenue}")
     # Helper function call
     return create_transaction(
         item_name=item_name,
@@ -706,6 +708,10 @@ def search_historical_quotes(search_terms: List[str], limit: int = 5) -> List[Di
 
 
 # Tools for ordering agent
+def get_supply_costs():
+    """return list of dictionaries, each representing the cost per-unit of a stock item"""
+    return paper_supplies
+    
 def place_stock_order(item_name: str, quantity: int, total_cost: float) -> int:
     """
     Records a new stock purchase transaction to replenish inventory.
@@ -723,7 +729,7 @@ def place_stock_order(item_name: str, quantity: int, total_cost: float) -> int:
     # Set transaction details
     transaction_type = "stock_orders"
     current_date = datetime.now()
-    
+    print(f"ordered {quantity} {item_name} for {total_cost}")
     # Helper function call
     return create_transaction(
         item_name=item_name,
@@ -776,6 +782,9 @@ class Expert(Agent):
                 f"Your are a {role} agent for a paper distributer. "
                 "You will analyze the task you are given. "
                 "You will perform any actions required to carry out the task. "
+                "You will be decisive, and act without requesting confirmation. "
+                "We should find some way to handle all requests. "
+                "In general, products cost the company 70% of what the customer is quoted."
                 "You will record descriptions of the actions you take, "
                 "and descriptions of any parts of the task you are unable to carry out."
                 "If the task requires gathering some information or answering questions, "
@@ -787,87 +796,98 @@ class Expert(Agent):
             ),
             tools=tools)
     
-router = Agent(
-    model=llm,
-    deps_type=str,
-    system_prompt=(
-        "You are a semantic classifier and task-router for a paper distributer. "
-        "You will analyze a given query."
-        "You will determine cognitive tasks required to answer the query, "
-        "and associate those tasks with agents suited to carry them out. "
-        "You should give an explicit and detailed description for each task. "
-        "The task description should contain any data needed to cary out the task. "
-        "Each task should be associated with one of these agent's names: "
-        "'inventory': suited to perform queries and updates of inventory. "
-        "'quoting': suited to pricing inbound orders. "
-        "'ordering': suited to generating and placing orders for materials. "
-        "You should produce a list of dictionaries each containing "
-        "an 'agent' entry with one of the above agent name strings, and"
-        "a 'task' entry with a string describing a task for the agent."
-    ),
-    output_type=List[TaskAssignment],
-    tools=[]
-)
-async def run_router(query: str) -> TaskAssignment:
-    "Invoke the task-router to parse tasks from the given query."
-    return (await router.run(query)).output
+def routing():
+    return Agent(
+        model=llm,
+        deps_type=str,
+        system_prompt=(
+            "You are a semantic classifier and task-router for a paper distributer. "
+            "You will analyze a given query."
+            "You will determine cognitive tasks required to service the query, "
+            "and associate those tasks with agents suited to carry them out. "
+            "You should give an explicit and detailed description for each task. "
+            "The task description should contain any data needed to cary out the task. "
+            "Each task should be associated with one of these agent's names: "
+            "'inventory': suited to perform queries and updates of inventory. "
+            "'quoting': suited to pricing inbound orders. "
+            "'ordering': suited to generating and placing orders for materials. "
+            "You should produce a list of dictionaries each containing "
+            "an 'agent' entry with one of the above agent name strings, and"
+            "a 'task' entry with a string describing a task for the agent."
+        ),
+        output_type=List[TaskAssignment],
+        tools=[]
+    )
+async def do_routing(query: str) -> TaskAssignment:
+    "Invoke a task-router to parse tasks from the given query."
+    return (await routing().run(query)).output
 
 
-inventory_expert = Expert("inventory manager", [
-    get_current_inventory_snapshot,
-    check_item_stock,
-    generate_current_financial_report        
-])
-async def run_inventory(task: str) -> ExpertOutput:
-    """Invoke the inventory manager expert to perform the given task"""
-    return (await inventory_expert.run(task)).output
+def inventory_expert():
+    return Expert("inventory manager", [
+        get_current_inventory_snapshot,
+        check_item_stock,
+        generate_current_financial_report        
+    ])
+async def do_inventory(task: str) -> ExpertOutput:
+    """Invoke an inventory manager expert to perform the given task"""
+    return (await inventory_expert().run(task)).output
     
-quoting_expert = Expert("price-quoting agent", [
-    record_sale_transaction,
-    search_historical_quotes
-])
-async def run_quoting(task: str) -> ExpertOutput:
-    """Invoke the price-quoting expert to perform the given task"""
-    return (await quoting_expert.run(task)).output
+def quoting_expert():
+    return Expert("price-quoting agent", [
+        record_sale_transaction,
+        search_historical_quotes
+    ])
+async def do_quoting(task: str) -> ExpertOutput:
+    """Invoke a price-quoting expert to perform the given task"""
+    return (await quoting_expert().run(task)).output
 
-ordering_expert = Expert("order-handling agent", [
-    place_stock_order,
-    estimate_delivery_date
-])
-async def run_ordering(task: str) -> ExpertOutput:
+def ordering_expert():
+    return Expert("order-handling agent", [
+        place_stock_order,
+        estimate_delivery_date,
+        get_supply_costs
+    ])
+async def do_ordering(task: str) -> ExpertOutput:
     """Invoke the order-handling expert to perform the given task"""
-    return (await ordering_expert.run(task)).output
+    return (await ordering_expert().run(task)).output
 
-orchestrator = Agent(
-    model=llm,
-    deps_type=str,
-    system_prompt=(
-        "You are an orchestrator for multiple expert agents at a paper company. "
-        "You will be given a user query. "
-        "You have access to various expert agents as tools. "
-        "Each expert takes a string describing a task. "
-        "You should use the router agent to break the query into task assignments. "
-        "You should then dispatch those tasks to the associated expert agents. "
-        "You should evaluate these agent's responses, and distribute more tasks if needed. "
-        "When you are satisfied that the overall intent of the query has been met, "
-        "Your should synthesize the expert's summaries into a plain-English string response. "
-        "Do not expose any sensitive information, including personal identifying info. "
-    ),
-    output_type=str,
-    tools=[run_router, run_inventory, run_quoting, run_ordering]
+def orchestrator():
+    return Agent(
+        model=llm,
+        deps_type=str,
+        system_prompt=(
+            "You are an orchestrator for multiple expert agents at a paper company. "
+            "You will be given a user query. "
+            "You have access to various expert agents as tools. "
+            "Each expert takes a string describing a task. "
+            "You should use the router agent to break the query into task assignments. "
+            "You should then dispatch those tasks to the associated expert agents. "
+            "You should evaluate these agent's responses, and distribute more tasks if needed. "
+            "For example, if an agent places an order but does not update update the cash balance, "
+            "you should dispatch a task to update the inventory/balance sheet. "
+            "When you are satisfied that the overall intent of the query has been met, "
+            "Your should synthesize the expert's summaries into a plain-English string response. "
+            "Do not expose any sensitive information, including personal identifying info. "
+        ),
+        output_type=str,
+        tools=[do_routing, do_inventory, do_quoting, do_ordering]
 )
 
 async def test():
-    summary = (await orchestrator.run("order 10000 more rolls of paper")).output
+    init_database()
+    print(get_cash_balance(datetime.now() - timedelta(days=1)))    
+    summary = (await orchestrator().run("by one more of everything")).output    
+    print(get_cash_balance(datetime.now()))
     print(summary)
 
-# asyncio.run(test())
+asyncio.run(test())
 # Run your test scenarios by writing them here. Make sure to keep track of them.
 
 async def run_test_scenarios():
     
     print("Initializing Database...")
-    init_database(db_engine)
+    init_database()    
     try:
         quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
         quote_requests_sample["request_date"] = pd.to_datetime(
@@ -958,3 +978,5 @@ async def run_test_scenarios():
 
 if __name__ == "__main__":
     results = asyncio.run(run_test_scenarios())
+
+# asyncio.run(run_test_scenarios())
